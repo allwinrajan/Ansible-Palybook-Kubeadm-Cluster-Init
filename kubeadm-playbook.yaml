@@ -6,7 +6,6 @@
     kubernetes_version: "1.29.6-1.1"
     pod_network_cidr: "192.168.0.0/16"
     api_server_advertise_address: "192.168.9.182"
-    node_name: "master"
     containerd_version: "1.7.14"
     runc_version: "1.1.12"
     cni_plugins_version: "1.5.0"
@@ -189,7 +188,7 @@
         kubeadm init
         --pod-network-cidr={{ pod_network_cidr }}
         --apiserver-advertise-address={{ api_server_advertise_address }}
-        --node-name={{ node_name }}
+        --node-name={{ ansible_hostname }}
       when: not kubeadm_init.stat.exists
       register: kubeadm_init_output
 

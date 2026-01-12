@@ -13,8 +13,22 @@ This guide provides step-by-step instructions to install a Kubernetes cluster us
 ### Step 1: Login to Your Server
 
 ```bash
-ssh administrator@192.168.9.182
-sudo su -
+sudo hostnamectl set-hostname k8s-master-stage-3
+exec bash
+hostname
+```
+- Output must be: k8s-master-stage-3
+- Edit hosts: 
+
+```bash
+sudo nano /etc/hosts
+```
+- Add: below 127.0.1.1       administrator 
+             192.168.9.182   k8s-master-stage-3
+- Test: 
+
+```bash
+ping -c 3 k8s-master-stage-3
 ```
 
 ### Step 2: Create Project Directory
@@ -33,6 +47,21 @@ add-apt-repository --yes --update ppa:ansible/ansible
 apt install -y ansible
 ```
 
+Fix locale for root:
+
+```bash
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
+cat >> /root/.bashrc <<'EOF'
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+EOF
+```
+
+exec bash
+
+
 Verify installation:
 ```bash
 ansible --version
@@ -45,7 +74,7 @@ ansible --version
 ```bash
 cat > inventory.ini <<'EOF'
 [master]
-192.168.9.182 ansible_connection=local
+k8s-master-stage-3 ansible_connection=local
 
 [master:vars]
 ansible_python_interpreter=/usr/bin/python3
@@ -69,6 +98,22 @@ become_user = root
 become_ask_pass = False
 EOF
 ```
+
+Test connectivity:
+
+```bash
+ansible master -m ping
+```
+
+- We should see: k8s-master-stage-3 | SUCCESS => {"ping": "pong"}
+
+Check hostname visibility:
+
+```bash
+ansible master -m setup | grep ansible_hostname
+```
+
+- Output:"ansible_hostname": "k8s-master-stage-3"
 
 #### Create kubeadm-playbook.yaml
 
