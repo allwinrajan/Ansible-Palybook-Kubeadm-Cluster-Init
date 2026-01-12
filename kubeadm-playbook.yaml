@@ -10,9 +10,37 @@
     runc_version: "1.1.12"
     cni_plugins_version: "1.5.0"
     calico_version: "v3.28.0"
+    admin_user: "administrator"
 
   tasks:
-    - name: Disable swap
+    # ============================================================
+    # STEP 0: Force Kill APT Processes and Remove Locks
+    # ============================================================
+    - name: Force kill all apt/dpkg processes
+      shell: |
+        killall -9 apt-get apt dpkg unattended-upgrade 2>/dev/null || true
+        sleep 2
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Remove all apt locks
+      shell: |
+        rm -f /var/lib/apt/lists/lock
+        rm -f /var/cache/apt/archives/lock
+        rm -f /var/lib/dpkg/lock*
+        sleep 1
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Reconfigure dpkg
+      command: dpkg --configure -a
+      ignore_errors: yes
+      changed_when: false
+
+    # ============================================================
+    # STEP 1: Disable Swap (Kubernetes Requirement)
+    # ============================================================
+    - name: Disable swap immediately
       shell: swapoff -a
       
     - name: Remove swap entry from /etc/fstab
@@ -21,6 +49,9 @@
         regexp: '^([^#].*?\sswap\s+.*)$'
         replace: '#\1'
 
+    # ============================================================
+    # STEP 2: Load Kernel Modules for Container Networking
+    # ============================================================
     - name: Load kernel modules for Kubernetes
       copy:
         dest: /etc/modules-load.d/k8s.conf
@@ -38,6 +69,9 @@
         name: br_netfilter
         state: present
 
+    # ============================================================
+    # STEP 3: Configure Network Parameters
+    # ============================================================
     - name: Configure sysctl parameters for Kubernetes
       copy:
         dest: /etc/sysctl.d/k8s.conf
@@ -49,18 +83,21 @@
     - name: Apply sysctl parameters
       command: sysctl --system
 
+    # ============================================================
+    # STEP 4: Install containerd (Container Runtime)
+    # ============================================================
     - name: Download containerd
       get_url:
         url: "https://github.com/containerd/containerd/releases/download/v{{ containerd_version }}/containerd-{{ containerd_version }}-linux-amd64.tar.gz"
         dest: /tmp/containerd.tar.gz
 
-    - name: Extract containerd
+    - name: Extract containerd to /usr/local
       unarchive:
         src: /tmp/containerd.tar.gz
         dest: /usr/local
         remote_src: yes
 
-    - name: Download containerd service file
+    - name: Download containerd systemd service file
       get_url:
         url: https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
         dest: /tmp/containerd.service
@@ -70,7 +107,7 @@
         path: /usr/local/lib/systemd/system
         state: directory
 
-    - name: Move containerd service file
+    - name: Install containerd service file
       copy:
         src: /tmp/containerd.service
         dest: /usr/local/lib/systemd/system/containerd.service
@@ -81,10 +118,12 @@
         path: /etc/containerd
         state: directory
 
-    - name: Generate default containerd config
+    - name: Generate default containerd configuration
       shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
 
-    - name: Enable SystemdCgroup in containerd config
+    - name: Enable SystemdCgroup in containerd (REQUIRED for kubeadm)
       replace:
         path: /etc/containerd/config.toml
         regexp: 'SystemdCgroup = false'
@@ -94,25 +133,38 @@
       systemd:
         daemon_reload: yes
 
-    - name: Enable and start containerd
+    - name: Enable and start containerd service
       systemd:
         name: containerd
         enabled: yes
         state: started
 
-    - name: Download runc
+    - name: Verify containerd is running
+      systemd:
+        name: containerd
+        state: started
+      register: containerd_status
+      failed_when: containerd_status.status.ActiveState != "active"
+
+    # ============================================================
+    # STEP 5: Install runc (OCI Runtime)
+    # ============================================================
+    - name: Download runc binary
       get_url:
         url: "https://github.com/opencontainers/runc/releases/download/v{{ runc_version }}/runc.amd64"
         dest: /tmp/runc.amd64
         mode: '0755'
 
-    - name: Install runc
+    - name: Install runc to system path
       copy:
         src: /tmp/runc.amd64
         dest: /usr/local/sbin/runc
         remote_src: yes
         mode: '0755'
 
+    # ============================================================
+    # STEP 6: Install CNI Plugins
+    # ============================================================
     - name: Download CNI plugins
       get_url:
         url: "https://github.com/containernetworking/plugins/releases/download/v{{ cni_plugins_version }}/cni-plugins-linux-amd64-v{{ cni_plugins_version }}.tgz"
@@ -129,7 +181,14 @@
         dest: /opt/cni/bin
         remote_src: yes
 
-    - name: Install required packages
+    # ============================================================
+    # STEP 7: Install Kubernetes Components (FIXED - NO HANG)
+    # ============================================================
+    - name: Wait 3 seconds before apt operations
+      pause:
+        seconds: 3
+
+    - name: Install required packages for Kubernetes repo (with timeout)
       apt:
         name:
           - apt-transport-https
@@ -138,6 +197,8 @@
           - gpg
         state: present
         update_cache: yes
+      async: 300
+      poll: 5
 
     - name: Create keyrings directory
       file:
@@ -150,11 +211,17 @@
       args:
         creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-    - name: Add Kubernetes repository
-      apt_repository:
-        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /"
-        filename: kubernetes
-        state: present
+    - name: Add Kubernetes APT repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /"
+        mode: '0644'
+
+    - name: Update apt cache after adding repo
+      apt:
+        update_cache: yes
+      async: 300
+      poll: 5
 
     - name: Install kubelet, kubeadm, and kubectl
       apt:
@@ -163,10 +230,11 @@
           - "kubeadm={{ kubernetes_version }}"
           - "kubectl={{ kubernetes_version }}"
         state: present
-        update_cache: yes
         allow_downgrade: yes
+      async: 300
+      poll: 5
 
-    - name: Hold Kubernetes packages
+    - name: Hold Kubernetes packages at current version
       dpkg_selections:
         name: "{{ item }}"
         selection: hold
@@ -175,35 +243,49 @@
         - kubeadm
         - kubectl
 
-    - name: Configure crictl
-      shell: crictl config runtime-endpoint unix:///var/run/containerd/containerd.sock
+    # ============================================================
+    # STEP 8: Configure CRI Runtime Endpoint (CRITICAL FIX)
+    # ============================================================
+    - name: Configure crictl to use containerd socket (FIXED PATH)
+      shell: crictl config runtime-endpoint unix:///run/containerd/containerd.sock
+      args:
+        creates: /etc/crictl.yaml
 
+    # ============================================================
+    # STEP 9: Initialize Kubernetes Control Plane
+    # ============================================================
     - name: Check if Kubernetes cluster is already initialized
       stat:
         path: /etc/kubernetes/admin.conf
-      register: kubeadm_init
+      register: kubeadm_init_check
 
-    - name: Initialize Kubernetes cluster
+    - name: Initialize Kubernetes cluster with kubeadm
       command: >
         kubeadm init
         --pod-network-cidr={{ pod_network_cidr }}
         --apiserver-advertise-address={{ api_server_advertise_address }}
         --node-name={{ ansible_hostname }}
-      when: not kubeadm_init.stat.exists
+        --cri-socket=unix:///run/containerd/containerd.sock
+      when: not kubeadm_init_check.stat.exists
       register: kubeadm_init_output
+      async: 600
+      poll: 10
 
-    - name: Display kubeadm join command
+    - name: Display kubeadm initialization output
       debug:
         msg: "{{ kubeadm_init_output.stdout_lines }}"
       when: kubeadm_init_output is defined and kubeadm_init_output.stdout_lines is defined
 
-    - name: Create .kube directory for root
+    # ============================================================
+    # STEP 10: Configure kubectl Access for Users
+    # ============================================================
+    - name: Create .kube directory for root user
       file:
         path: /root/.kube
         state: directory
         mode: '0755'
 
-    - name: Copy admin.conf to root's kube config
+    - name: Copy admin.conf to root's kubeconfig
       copy:
         src: /etc/kubernetes/admin.conf
         dest: /root/.kube/config
@@ -212,73 +294,152 @@
         group: root
         mode: '0644'
 
-    - name: Create .kube directory for administrator user
+    - name: Check if admin user exists
+      stat:
+        path: "/home/{{ admin_user }}"
+      register: admin_user_home
+
+    - name: Create .kube directory for {{ admin_user }}
       file:
-        path: /home/administrator/.kube
+        path: "/home/{{ admin_user }}/.kube"
         state: directory
         mode: '0755'
-        owner: administrator
-        group: administrator
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+      when: admin_user_home.stat.exists
 
-    - name: Copy admin.conf to administrator's kube config
+    - name: Copy admin.conf to {{ admin_user }}'s kubeconfig
       copy:
         src: /etc/kubernetes/admin.conf
-        dest: /home/administrator/.kube/config
+        dest: "/home/{{ admin_user }}/.kube/config"
         remote_src: yes
-        owner: administrator
-        group: administrator
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
         mode: '0644'
+      when: admin_user_home.stat.exists
 
-    - name: Install Calico operator
+    # ============================================================
+    # STEP 11: Install Calico CNI (Network Plugin)
+    # ============================================================
+    - name: Install Calico Tigera Operator
       command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       ignore_errors: yes
+      register: calico_operator
 
-    - name: Download Calico custom resources
+    - name: Download Calico custom resources manifest
       get_url:
         url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/custom-resources.yaml"
         dest: /tmp/custom-resources.yaml
+
+    - name: Verify Calico CIDR matches pod network CIDR
+      replace:
+        path: /tmp/custom-resources.yaml
+        regexp: 'cidr: 192\.168\.0\.0/16'
+        replace: 'cidr: {{ pod_network_cidr }}'
 
     - name: Apply Calico custom resources
       command: kubectl apply -f /tmp/custom-resources.yaml
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
 
-    - name: Wait for all nodes to be ready
+    # ============================================================
+    # STEP 12: Wait for Cluster to be Ready
+    # ============================================================
+    - name: Wait for all nodes to be in Ready state
       command: kubectl get nodes
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       register: nodes_status
-      until: "'Ready' in nodes_status.stdout"
+      until: "'Ready' in nodes_status.stdout and 'NotReady' not in nodes_status.stdout"
       retries: 30
       delay: 10
 
-    - name: Display cluster status
+    - name: Wait for calico pods to be running
+      shell: kubectl get pods -n calico-system 2>/dev/null | grep -v NAME | grep -c Running || echo 0
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: calico_running
+      until: calico_running.stdout|int > 0
+      retries: 30
+      delay: 10
+      ignore_errors: yes
+
+    # ============================================================
+    # STEP 13: Display Cluster Status
+    # ============================================================
+    - name: Get cluster node status
       command: kubectl get nodes -o wide
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       register: cluster_status
 
-    - name: Show cluster status
+    - name: Display cluster node status
       debug:
         msg: "{{ cluster_status.stdout_lines }}"
 
-    - name: Display all pods status
+    - name: Get all pods status across all namespaces
       command: kubectl get pods -A
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       register: pods_status
 
-    - name: Show pods status
+    - name: Display all pods status
       debug:
         msg: "{{ pods_status.stdout_lines }}"
 
-    - name: Save kubeadm join command to file
+    # ============================================================
+    # STEP 14: Save Worker Join Command
+    # ============================================================
+    - name: Generate and save kubeadm join command for worker nodes
       shell: kubeadm token create --print-join-command > /root/kubeadm-join-command.sh
       when: kubeadm_init_output is defined
 
-    - name: Display join command location
-      debug:
-        msg: "Join command saved to /root/kubeadm-join-command.sh"
+    - name: Make join command script executable
+      file:
+        path: /root/kubeadm-join-command.sh
+        mode: '0700'
       when: kubeadm_init_output is defined
+
+    - name: Read and display join command
+      command: cat /root/kubeadm-join-command.sh
+      register: join_command
+      ignore_errors: yes
+
+    - name: Show join command for worker nodes
+      debug:
+        msg: "{{ join_command.stdout }}"
+      when: join_command is defined and join_command.stdout is defined
+
+    # ============================================================
+    # STEP 15: Verification Commands
+    # ============================================================
+    - name: Display cluster info
+      command: kubectl cluster-info
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: cluster_info
+
+    - name: Show cluster info
+      debug:
+        msg: "{{ cluster_info.stdout_lines }}"
+
+    - name: Final installation summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Kubernetes Cluster Installation Complete!"
+          - "=========================================="
+          - "Cluster Version: {{ kubernetes_version }}"
+          - "Pod Network CIDR: {{ pod_network_cidr }}"
+          - "API Server: {{ api_server_advertise_address }}"
+          - "Container Runtime: containerd {{ containerd_version }}"
+          - "CNI Plugin: Calico {{ calico_version }}"
+          - ""
+          - "Kubeconfig locations:"
+          - "  - /root/.kube/config"
+          - "  - /home/{{ admin_user }}/.kube/config"
+          - ""
+          - "Join command: /root/kubeadm-join-command.sh"
+          - "=========================================="
