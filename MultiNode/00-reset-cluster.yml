@@ -1,0 +1,59 @@
+---
+- name: Reset Kubernetes Cluster on All Nodes
+  hosts: cluster
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Check if kubeadm is installed
+      command: which kubeadm
+      register: kubeadm_exists
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Reset kubeadm cluster
+      command: kubeadm reset -f
+      when: kubeadm_exists.rc == 0
+      ignore_errors: yes
+
+    - name: Remove .kube directory from root
+      file:
+        path: /root/.kube
+        state: absent
+
+    - name: Remove .kube directory from admin user
+      file:
+        path: "/home/{{ admin_user }}/.kube"
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove CNI configuration
+      file:
+        path: /etc/cni/net.d
+        state: absent
+
+    - name: Recreate CNI directory
+      file:
+        path: /etc/cni/net.d
+        state: directory
+
+    - name: Clean iptables rules
+      shell: |
+        iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+      ignore_errors: yes
+
+    - name: Remove containerd config (will be regenerated)
+      file:
+        path: /etc/containerd/config.toml
+        state: absent
+      ignore_errors: yes
+
+    - name: Restart containerd service
+      systemd:
+        name: containerd
+        state: restarted
+      ignore_errors: yes
+
+    - name: Display reset completion message
+      debug:
+        msg: "Kubernetes cluster has been reset on {{ inventory_hostname }}"

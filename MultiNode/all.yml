@@ -1,0 +1,27 @@
+---
+# Kubernetes Cluster Configuration
+kubernetes_version: "1.29.6-1.1"
+pod_network_cidr: "192.168.0.0/16"
+service_cidr: "10.96.0.0/12"
+
+# Master Node Configuration
+master_ip: "192.168.9.182"
+master_hostname: "k8s-master"
+
+# Worker Nodes Configuration
+worker1_ip: "192.168.9.171"
+worker1_hostname: "k8s-worker1"
+
+worker2_ip: "192.168.9.173"
+worker2_hostname: "k8s-worker2"
+
+# Container Runtime Versions
+containerd_version: "1.7.14"
+runc_version: "1.1.12"
+cni_plugins_version: "1.5.0"
+
+# Network Plugin
+calico_version: "v3.28.0"
+
+# User Configuration
+admin_user: "administrator"

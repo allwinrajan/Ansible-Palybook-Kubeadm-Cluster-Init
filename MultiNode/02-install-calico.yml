@@ -1,0 +1,135 @@
+---
+- name: Install Calico CNI Network Plugin
+  hosts: master
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Wait for API server to be ready
+      command: kubectl get nodes
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: api_ready
+      until: api_ready.rc == 0
+      retries: 30
+      delay: 10
+      ignore_errors: yes
+
+    - name: Check if Calico is already installed
+      shell: kubectl get pods -n calico-system 2>/dev/null | wc -l
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: calico_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Calico Tigera Operator
+      command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: calico_check.stdout|int < 2
+      ignore_errors: yes
+      register: calico_operator
+
+    - name: Wait for Tigera operator to be ready
+      pause:
+        seconds: 15
+      when: calico_operator.changed
+
+    - name: Download Calico custom resources manifest
+      get_url:
+        url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/custom-resources.yaml"
+        dest: /tmp/custom-resources.yaml
+
+    - name: Verify Calico CIDR matches pod network CIDR
+      replace:
+        path: /tmp/custom-resources.yaml
+        regexp: 'cidr: 192\.168\.0\.0/16'
+        replace: 'cidr: {{ pod_network_cidr }}'
+
+    - name: Display custom resources configuration
+      command: cat /tmp/custom-resources.yaml
+      register: custom_resources
+      changed_when: false
+
+    - name: Show custom resources
+      debug:
+        msg: "{{ custom_resources.stdout_lines }}"
+
+    - name: Apply Calico custom resources
+      command: kubectl apply -f /tmp/custom-resources.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: calico_check.stdout|int < 2
+
+    - name: Wait for calico-system namespace to be created
+      shell: kubectl get namespace calico-system 2>/dev/null
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: calico_ns
+      until: calico_ns.rc == 0
+      retries: 30
+      delay: 10
+      ignore_errors: yes
+
+    - name: Wait for Calico pods to be running (this may take 2-3 minutes)
+      shell: kubectl get pods -n calico-system --no-headers 2>/dev/null | grep -v Completed | awk '{print $3}' | grep -c Running || echo 0
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: calico_running
+      until: calico_running.stdout|int >= 2
+      retries: 40
+      delay: 15
+      ignore_errors: yes
+
+    - name: Get Calico pods status
+      command: kubectl get pods -n calico-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: calico_pods
+      ignore_errors: yes
+
+    - name: Display Calico pods status
+      debug:
+        msg: "{{ calico_pods.stdout_lines }}"
+      when: calico_pods.rc == 0
+
+    - name: Get Tigera operator status
+      command: kubectl get pods -n tigera-operator
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: tigera_pods
+      ignore_errors: yes
+
+    - name: Display Tigera operator status
+      debug:
+        msg: "{{ tigera_pods.stdout_lines }}"
+      when: tigera_pods.rc == 0
+
+    - name: Wait for all nodes to be Ready
+      command: kubectl get nodes
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: nodes_status
+      until: "'Ready' in nodes_status.stdout and 'NotReady' not in nodes_status.stdout"
+      retries: 30
+      delay: 10
+      ignore_errors: yes
+
+    - name: Display nodes status
+      debug:
+        msg: "{{ nodes_status.stdout_lines }}"
+
+    - name: Display Calico installation summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Calico CNI Installation Complete!"
+          - "=========================================="
+          - "Version: {{ calico_version }}"
+          - "Pod Network CIDR: {{ pod_network_cidr }}"
+          - ""
+          - "Verify with:"
+          - "  kubectl get pods -n calico-system"
+          - "  kubectl get nodes"
+          - "=========================================="
