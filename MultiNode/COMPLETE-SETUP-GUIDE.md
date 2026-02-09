@@ -131,10 +131,140 @@ Reading package lists... Done
 
 ## Phase 2: SSH Key Configuration
 
-### Step 2.1: Generate SSH Key on Master (Control Machine)
+### Step 2.1: Enable Root SSH Login on ALL Nodes
+
+**You must do this on Master, Worker1, and Worker2 FIRST!**
+
+**On Master (192.168.9.182):**
+```bash
+# Edit SSH config
+nano /etc/ssh/sshd_config
+
+# Find and change these lines (remove # if commented):
+# FROM:
+#PermitRootLogin prohibit-password
+#PasswordAuthentication yes
+
+# TO:
+PermitRootLogin yes
+PasswordAuthentication yes
+
+# Save and exit (Ctrl+X, then Y, then Enter)
+
+# Restart SSH service
+systemctl restart sshd
+```
+
+**On Worker1 (192.168.9.171):**
+```bash
+# SSH to worker1 as administrator first
+ssh administrator@192.168.9.171
+sudo su -
+
+# Edit SSH config
+nano /etc/ssh/sshd_config
+
+# Change these lines:
+PermitRootLogin yes
+PasswordAuthentication yes
+
+# Save and exit
+systemctl restart sshd
+exit
+exit
+```
+
+**On Worker2 (192.168.9.173):**
+```bash
+# SSH to worker2 as administrator first
+ssh administrator@192.168.9.173
+sudo su -
+
+# Edit SSH config
+nano /etc/ssh/sshd_config
+
+# Change these lines:
+PermitRootLogin yes
+PasswordAuthentication yes
+
+# Save and exit
+systemctl restart sshd
+exit
+exit
+```
+
+**Quick method - do this on ALL three nodes:**
+```bash
+# On each node, run as root:
+sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i 's/^PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+systemctl restart sshd
+```
+
+**Verify SSH configuration on each node:**
+```bash
+grep -E "^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config
+```
+
+**Expected Output:**
+```
+PermitRootLogin yes
+PasswordAuthentication yes
+```
+
+### Step 2.2: Set Root Password on All Nodes
+
+**If root doesn't have a password, set it:**
+
+**On Master:**
+```bash
+# As administrator user
+sudo passwd root
+# Enter new password twice
+```
+
+**On Worker1:**
+```bash
+ssh administrator@192.168.9.171
+sudo passwd root
+# Enter new password twice
+exit
+```
+
+**On Worker2:**
+```bash
+ssh administrator@192.168.9.173
+sudo passwd root
+# Enter new password twice
+exit
+```
+
+### Step 2.3: Test Root SSH Login
+
+**From Master, test root SSH to all nodes:**
+```bash
+# Test Master (should ask for password)
+ssh root@192.168.9.182 "hostname"
+# Type password when prompted
+# Should output: KubernetesMaster
+
+# Test Worker1 (should ask for password)
+ssh root@192.168.9.171 "hostname"
+# Type password when prompted
+# Should output: KubernetesWorker1
+
+# Test Worker2 (should ask for password)
+ssh root@192.168.9.173 "hostname"
+# Type password when prompted
+# Should output: KubernetesWorker2
+```
+
+### Step 2.4: Generate SSH Key on Master (Control Machine)
 
 ```bash
-# On master node (192.168.9.182)
+# On master node (192.168.9.182) as root
 ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
 ```
 
@@ -145,25 +275,29 @@ Your identification has been saved in /root/.ssh/id_rsa
 Your public key has been saved in /root/.ssh/id_rsa.pub
 ```
 
-### Step 2.2: Copy SSH Key to Master (itself)
+### Step 2.5: Copy SSH Key to Master (itself)
 
 ```bash
-# On master node
+# On master node as root
 ssh-copy-id root@192.168.9.182
-# When prompted, type 'yes' and enter root password
+# Type 'yes' when prompted
+# Enter root password when prompted
 ```
 
 **Expected Output:**
 ```
 Number of key(s) added: 1
+
+Now try logging into the machine, with:   "ssh 'root@192.168.9.182'"
 ```
 
-### Step 2.3: Copy SSH Key to Worker1
+### Step 2.6: Copy SSH Key to Worker1
 
 ```bash
-# On master node
+# On master node as root
 ssh-copy-id root@192.168.9.171
-# When prompted, type 'yes' and enter root password
+# Type 'yes' when prompted
+# Enter root password when prompted
 ```
 
 **Expected Output:**
@@ -171,12 +305,13 @@ ssh-copy-id root@192.168.9.171
 Number of key(s) added: 1
 ```
 
-### Step 2.4: Copy SSH Key to Worker2
+### Step 2.7: Copy SSH Key to Worker2
 
 ```bash
-# On master node
+# On master node as root
 ssh-copy-id root@192.168.9.173
-# When prompted, type 'yes' and enter root password
+# Type 'yes' when prompted
+# Enter root password when prompted
 ```
 
 **Expected Output:**
@@ -184,18 +319,18 @@ ssh-copy-id root@192.168.9.173
 Number of key(s) added: 1
 ```
 
-### Step 2.5: Test SSH Connectivity
+### Step 2.8: Test SSH Connectivity (Passwordless)
 
 ```bash
-# On master node
+# On master node as root
 ssh root@192.168.9.182 "hostname"
-# Should output: KubernetesMaster (without password prompt)
+# Should output: KubernetesMaster (NO password prompt)
 
 ssh root@192.168.9.171 "hostname"
-# Should output: KubernetesWorker1 (without password prompt)
+# Should output: KubernetesWorker1 (NO password prompt)
 
 ssh root@192.168.9.173 "hostname"
-# Should output: KubernetesWorker2 (without password prompt)
+# Should output: KubernetesWorker2 (NO password prompt)
 ```
 
 **✅ Checkpoint:** You should be able to SSH to all nodes without entering a password.
@@ -204,7 +339,50 @@ ssh root@192.168.9.173 "hostname"
 
 ## Phase 3: Ansible Installation & Configuration
 
-### Step 3.1: Install Ansible on Master
+### Step 3.1: Fix Locale Settings (Required for Ansible)
+
+**Ansible requires UTF-8 locale. Fix this first:**
+
+```bash
+# On master node (192.168.9.182)
+# Generate UTF-8 locale
+locale-gen en_US.UTF-8
+
+# Set system locale
+update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+# Export for current session
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
+# Add to bashrc for persistence
+echo 'export LANG=en_US.UTF-8' >> /root/.bashrc
+echo 'export LC_ALL=en_US.UTF-8' >> /root/.bashrc
+
+# Verify locale
+locale
+```
+
+**Expected Output:**
+```
+LANG=en_US.UTF-8
+LANGUAGE=
+LC_CTYPE="en_US.UTF-8"
+LC_NUMERIC="en_US.UTF-8"
+LC_TIME="en_US.UTF-8"
+LC_COLLATE="en_US.UTF-8"
+LC_MONETARY="en_US.UTF-8"
+LC_MESSAGES="en_US.UTF-8"
+LC_PAPER="en_US.UTF-8"
+LC_NAME="en_US.UTF-8"
+LC_ADDRESS="en_US.UTF-8"
+LC_TELEPHONE="en_US.UTF-8"
+LC_MEASUREMENT="en_US.UTF-8"
+LC_IDENTIFICATION="en_US.UTF-8"
+LC_ALL=en_US.UTF-8
+```
+
+### Step 3.2: Install Ansible on Master
 
 ```bash
 # On master node (192.168.9.182)
@@ -218,11 +396,11 @@ apt install -y ansible
 **Expected Output:**
 ```
 ...
-Setting up ansible (2.x.x)
+Setting up ansible (10.x.x)
 Processing triggers for man-db
 ```
 
-### Step 3.2: Verify Ansible Installation
+### Step 3.3: Verify Ansible Installation
 
 ```bash
 ansible --version
@@ -230,12 +408,24 @@ ansible --version
 
 **Expected Output:**
 ```
-ansible [core 2.x.x]
+ansible [core 2.17.x]
   config file = /etc/ansible/ansible.cfg
+  configured module search path = ['/root/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/lib/python3/dist-packages/ansible
+  ansible collection location = /root/.ansible/collections:/usr/share/ansible/collections
+  executable location = /usr/bin/ansible
   python version = 3.10.x
 ```
 
-### Step 3.3: Create Project Directory
+**If you see "ERROR: Ansible requires the locale encoding to be UTF-8":**
+```bash
+# Run locale fix again
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+ansible --version
+```
+
+### Step 3.4: Create Project Directory
 
 ```bash
 # On master node
@@ -243,7 +433,7 @@ mkdir -p /root/k8s-cluster
 cd /root/k8s-cluster
 ```
 
-### Step 3.4: Download Playbook Files
+### Step 3.5: Download Playbook Files
 
 **Option A: If you have the files on your laptop, use SCP:**
 ```bash
@@ -311,7 +501,7 @@ admin_user: "root"
 EOF
 ```
 
-### Step 3.5: Test Ansible Connectivity
+### Step 3.6: Test Ansible Connectivity
 
 ```bash
 cd /root/k8s-cluster
@@ -459,13 +649,12 @@ ssh root@192.168.9.182
 ### Step 6.2: Initialize Kubernetes Cluster
 
 ```bash
-kubeadm init \
+  kubeadm init \
   --pod-network-cidr=192.168.0.0/16 \
   --service-cidr=10.96.0.0/12 \
   --apiserver-advertise-address=192.168.9.182 \
-  --node-name=KubernetesMaster \
-  --cri-socket=unix:///run/containerd/containerd.sock \
-  --v=5
+  --node-name=kubernetesmaster \
+  --cri-socket=unix:///run/containerd/containerd.sock
 ```
 
 **Expected Duration:** 2-5 minutes
@@ -836,7 +1025,66 @@ CoreDNS is running at https://192.168.9.182:6443/api/v1/namespaces/kube-system/s
 
 ## Troubleshooting
 
-### Issue 1: Node Shows "NotReady"
+### Issue 0: Ansible Locale Error
+
+**Symptom:**
+```
+ERROR: Ansible requires the locale encoding to be UTF-8; Detected ISO8859-1.
+```
+
+**Solution:**
+```bash
+# On master node
+locale-gen en_US.UTF-8
+update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+echo 'export LANG=en_US.UTF-8' >> /root/.bashrc
+echo 'export LC_ALL=en_US.UTF-8' >> /root/.bashrc
+
+# Verify
+locale
+ansible --version
+```
+
+### Issue 1: SSH Permission Denied (Password Authentication)
+
+**Symptom:**
+```
+root@192.168.9.182's password: 
+Permission denied, please try again.
+```
+
+**Solution:**
+
+1. **Check SSH configuration on the target node:**
+```bash
+# On the node you're trying to access
+sudo grep -E "^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config
+```
+
+2. **If not showing "yes", fix it:**
+```bash
+# On the target node
+sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sudo systemctl restart sshd
+```
+
+3. **Verify root password is set:**
+```bash
+# On the target node
+sudo passwd root
+# Enter new password twice
+```
+
+4. **Test SSH again:**
+```bash
+# From master
+ssh root@<target-node-ip> "hostname"
+```
+
+### Issue 2: Node Shows "NotReady"
 
 **Check:**
 ```bash
@@ -849,7 +1097,7 @@ ssh root@<node-ip> "journalctl -u kubelet -n 50"
 ssh root@<node-ip> "systemctl restart kubelet"
 ```
 
-### Issue 2: Pods Stuck in "Pending"
+### Issue 3: Pods Stuck in "Pending"
 
 **Check:**
 ```bash
@@ -862,7 +1110,7 @@ kubectl get events --sort-by='.lastTimestamp'
 - No worker nodes available (join workers)
 - Resource constraints (check with `kubectl describe nodes`)
 
-### Issue 3: Cannot Join Worker Nodes
+### Issue 4: Cannot Join Worker Nodes
 
 **Check token validity:**
 ```bash
@@ -876,7 +1124,7 @@ kubeadm token list
 kubeadm token create --print-join-command
 ```
 
-### Issue 4: Calico Pods Not Starting
+### Issue 5: Calico Pods Not Starting
 
 **Check:**
 ```bash
@@ -890,7 +1138,7 @@ kubectl delete -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0
 ansible-playbook -i inventory.ini 02-install-calico.yml
 ```
 
-### Issue 5: DNS Not Working
+### Issue 6: DNS Not Working
 
 **Test DNS:**
 ```bash
